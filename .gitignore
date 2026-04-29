@@ -7,6 +7,10 @@ __pycache__/
 # misc
 .DS_Store
 .idea*
+examples/test_*
+examples/*.txt
+examples/*.png
+experiments/*
 
 # C extensions
 *.so
@@ -86,9 +90,17 @@ celerybeat-schedule
 # virtualenv
 venv/
 ENV/
+.venv/
 
 # Spyder project settings
 .spyderproject
 
+# Codium
+.vscode/*
+
 # Rope project settings
 .ropeproject
+
+# pytest cache
+.pytest_cache
+.aider*

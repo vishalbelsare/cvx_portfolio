@@ -1,100 +1,188 @@
-"""
-Copyright 2017 Stephen Boyd, Enzo Busseti, Steven Diamond, BlackRock Inc.
+# Copyright (C) 2023-2024 Enzo Busseti
+#
+# This file is part of Cvxportfolio.
+#
+# Cvxportfolio is free software: you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version.
+#
+# Cvxportfolio is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE. See the GNU General Public License for more
+# details.
+#
+# You should have received a copy of the GNU General Public License along with
+# Cvxportfolio. If not, see <https://www.gnu.org/licenses/>.
+"""This module contains miscellaneous functions."""
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+import hashlib
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
-import logging
-
-
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from .errors import DataError
 
-logger = logging.getLogger(__name__)
-
-__all__ = ['null_checker', 'non_null_data_args',
-           'values_in_time', 'plot_what_if']
+TRUNCATE_REPR_HASH = 10  # probability of conflict is 1e-16
 
 
-def values_in_time(obj, t, tau=None):
-    """Obtain value(s) of object at time t, or right before.
+__all__ = ['periods_per_year_from_datetime_index', 'resample_returns',
+           'flatten_heterogeneous_list', 'repr_numpy_pandas',
+           'average_periods_per_year']
 
-    Optionally specify time tau>=t for which we want a prediction,
-    otherwise it is assumed tau = t.
 
-    obj: callable, pd.Series, pd.DataFrame, or something else.
+def set_pd_read_only(df_or_ser):
+    """Set numpy array contained in dataframe or series to read only.
 
-        If a callable, we return obj(t,tau).
+    This is done on data store internally before it is served to the
+    policy or the simulator to ensure data consistency in case some
+    element of the pipeline accidentally corrupts the data.
 
-        If obj has an index attribute,
-        we try to return obj.loc[t],
-        or obj.loc[t, tau], if the index is a MultiIndex.
-        If not available, we return obj.
+    This is enough to prevent direct assignement to the resulting
+    dataframe. However it could still be accidentally corrupted by
+    assigning to columns or indices that are not present in the
+    original. We avoid that case as well by returning a wrapped
+    dataframe (which doesn't copy data on creation) in
+    serve_data_policy and serve_data_simulator.
 
-        Otherwise, we return obj.
+    :param df_or_ser: Series or Dataframe, only numeric (better if
+        homogeneous) dtype.
+    :type df_or_ser: pd.Series or pd.DataFrame
 
-    t: np.Timestamp (or similar). Time at which we want
-        the value.
+    :returns: Pandas object set to read only.
+    :rtype: pd.Series or pd.DataFrame
+    """
+    data = df_or_ser.values
+    data.flags.writeable = False
+    if hasattr(df_or_ser, 'columns'):
+        return pd.DataFrame(data, index=df_or_ser.index,
+                            columns=df_or_ser.columns)
+    return pd.Series(data, index=df_or_ser.index, name=df_or_ser.name)
 
-    tau: np.Timestamp (or similar), or None. Time tau >= t
-        of the prediction,  e.g., tau could be tomorrow, t
-        today, and we ask for prediction of market volume tomorrow,
-        made today. If None, then it is assumed tau = t.
 
+def average_periods_per_year(num_periods, first_time, last_time):
+    """Average periods per year of a datetime index (unpacked), rounded to int.
+
+    :param num_periods: Length of the index.
+    :type num_periods: int
+    :param first_time: First timestamp in the index.
+    :type first_time: pandas.Timestamp
+    :param last_time: Last timestamp in the index.
+    :type last_time: pandas.Timestamp
+
+    :returns: Average number of periods in a year, as implied by the index.
+    :rtype: int
+    """
+    return int(np.round(num_periods / ((last_time - first_time) /
+                                    pd.Timedelta('365.24d'))))
+
+def periods_per_year_from_datetime_index(idx):
+    """Average periods per year of a datetime index, rounded to int.
+
+    :param idx: Datetime index, *e.g.*, of a returns dataframe.
+    :type idx: pandas.DatetimeIndex
+
+    :returns: Average number of periods in a year, as implied by the index.
+    :rtype: int
+    """
+    return average_periods_per_year(
+        num_periods=len(idx), first_time=idx[0], last_time=idx[-1])
+
+
+def resample_returns(returns, periods):
+    """Resample returns expressed over number of periods to single period.
+
+    :param returns: Original returns whith are, *e.g.*, annualized, and we
+        want to get as daily.
+    :type returns: pandas.Series
+    :param periods: Number of trading periods (*e.g.*, trading days) in the
+         period of the returns (*e.g.*, 252 if annualized).
+    :type periods: int
+
+    :returns: Resampled returns.
+    :rtype: pandas.Series
+    """
+    return np.exp(np.log(1 + returns) / periods) - 1
+
+def make_numeric(np_or_pd):
+    """Coerce Pandas or Numpy object to numeric.
+
+    :param np_or_pd: User-provided data.
+    :type np_or_pd: np.array, pd.Series, pd.DataFrame, object
+
+    :raises DataError: If input data could not be casted to numeric.
+
+    :returns: Same object, casted to numeric if necessary
+    :rtype: np.array, pd.Series, pd.DataFrame, object
     """
 
-    if hasattr(obj, '__call__'):
-        return obj(t, tau)
+    try:
+        if isinstance(np_or_pd, np.ndarray):
+            if not np.issubdtype(np_or_pd.dtype, np.number):
+                return np_or_pd.astype(float)
 
-    if isinstance(obj, pd.Series) or isinstance(obj, pd.DataFrame):
-        try:
-            if isinstance(obj.index, pd.MultiIndex):
-                return obj.loc[(t, tau)]
-            else:
-                return obj.loc[t]
-        except KeyError:
-            return obj
+        if isinstance(np_or_pd, pd.Series):
+            if not np.issubdtype(np_or_pd.dtype, np.number):
+                return pd.to_numeric(np_or_pd)
 
-    return obj
+        if isinstance(np_or_pd, pd.DataFrame):
+            if not np.all(
+                [np.issubdtype(el, np.number) for el in set(np_or_pd.dtypes)]):
+                return np_or_pd.astype(float)
 
+    except ValueError as exc:
+        raise DataError("Input data could not be cast to numeric.") from exc
 
-def plot_what_if(time, true_results, alt_results):
-    true_results.value.plot(label=true_results.pol_name)
-    for result in alt_results:
-        result.value.plot(label=result.pol_name, linestyle="--")
-    plt.axvline(x=time, linestyle=":")
+    return np_or_pd
 
 
-def null_checker(obj):
-    """Check if obj contains NaN."""
-    if (isinstance(obj, pd.DataFrame) or
-            isinstance(obj, pd.Series)):
-        if np.any(pd.isnull(obj)):
-            raise ValueError('Data object contains NaN values', obj)
-    elif np.isscalar(obj):
-        if np.isnan(obj):
-            raise ValueError('Data object contains NaN values', obj)
-    else:
-        raise TypeError('Data object can only be scalar or Pandas.')
+def flatten_heterogeneous_list(li):
+    """[1, 2, 3, [4, 5]] -> [1, 2, 3, 4, 5].
+
+    :param li: List that may contain lists, which we concatenate.
+    :type li: list
+
+    :returns: Flattened list.
+    :rtype: list
+    """
+    return sum(([el] if not hasattr(el, '__iter__')
+                else el for el in li), [])
 
 
-def non_null_data_args(f):
-    def new_f(*args, **kwds):
-        for el in args:
-            null_checker(el)
-        for el in kwds.values():
-            null_checker(el)
-        return f(*args, **kwds)
-    return new_f
+def hash_(array_like):
+    """Hash np.array.
+
+    :param array_like: Array object of which we obtain a hash.
+    :type array_like: numpy.array
+
+    :returns: Unique hash.
+    :rtype: str
+    """
+    return hashlib.sha256(
+        bytes(str(list(array_like.flatten())), 'utf-8')).hexdigest()[
+            :TRUNCATE_REPR_HASH]
+
+
+def repr_numpy_pandas(nppd):
+    """Unique repr of a numpy or pandas object.
+
+    :param nppd: Numpy or pandas object of which we obtain a unique hash.
+    :type nppd: numpy.array, pandas.Series, pandas.DataFrame
+
+    :raises NotImplementedError: If the object is not supported.
+
+    :returns: Unique hash.
+    :rtype: str
+    """
+    if isinstance(nppd, np.ndarray):
+        return f'np.array(hash={hash_(nppd)})'
+    # if isinstance(nppd, np.matrix):
+    #     return f'np.array(hash={hash_(nppd.A)})'
+    if isinstance(nppd, pd.Series):
+        return f'pd.Series(hash_values={hash_(nppd.values)}, '\
+            + f'hash_index={hash_(nppd.index.to_numpy())})'
+    if isinstance(nppd, pd.DataFrame):
+        return f'pd.DataFrame(hash_values={hash_(nppd.values)}, '\
+            + f'hash_index={hash_(nppd.index.to_numpy())}, '\
+            + f'hash_columns={hash_(nppd.columns.to_numpy())})'
+    raise NotImplementedError('The provided data type is not supported.')
